@@ -35,7 +35,7 @@
                 <i class="fab fa-instagram text-pink-500 text-4xl"></i>
                 Instagram Viewer
             </h1>
-            <p class="text-gray-600">URLを貼り付けるだけで、Instagramの投稿を一覧表示します。<br class="hidden md:block">追加したデータはブラウザに保存されます。</p>
+            <p class="text-gray-600">URLを貼り付けるだけで、Instagramの投稿を一覧表示します。<br class="hidden md:block">追加したデータはGoogleスプレッドシートに保存されます。</p>
         </div>
 
         <!-- URL入力フォーム -->
@@ -63,6 +63,12 @@
             <!-- JavaScriptでここに投稿が追加されます -->
         </div>
 
+        <!-- ローディング表示 -->
+        <div id="loading-state" class="text-center py-10 hidden">
+            <i class="fas fa-spinner fa-spin text-3xl text-pink-500 mb-2"></i>
+            <p class="text-gray-500">データを読み込んでいます...</p>
+        </div>
+
         <!-- 投稿がない場合の表示 -->
         <div id="empty-state" class="text-center py-16 hidden">
             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-200 mb-4">
@@ -74,21 +80,32 @@
     </div>
 
     <script>
+        // ▼▼▼ ここにGASで発行したWebアプリのURLを貼り付けます ▼▼▼
+        const GAS_URL = 'https://script.google.com/macros/s/AKfycbzbBc1iIJ96nRHQdLL8qb312IHwdEYfvbZGVYot_9rdgIysSrlCHNE2CRWmczHR1fBBLQ/exec'; 
+        // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
         document.addEventListener('DOMContentLoaded', () => {
             const form = document.getElementById('add-form');
             const urlInput = document.getElementById('url-input');
             const errorMessage = document.getElementById('error-message');
             const postsGrid = document.getElementById('posts-grid');
             const emptyState = document.getElementById('empty-state');
+            const loadingState = document.getElementById('loading-state');
+            const submitBtn = form.querySelector('button[type="submit"]');
 
-            // LocalStorageから保存された投稿を読み込む（なければ空配列）
-            let posts = JSON.parse(localStorage.getItem('insta_viewer_posts')) || [];
+            let posts = [];
 
-            // 初期表示
-            renderPosts();
+            // 初期表示: GASのURLが設定されているかチェック
+            if (!GAS_URL) {
+                postsGrid.innerHTML = '<div class="col-span-full text-center text-red-500 py-10 font-bold bg-red-50 rounded-lg border border-red-200">エラー：コード内の <code>GAS_URL</code> にURLが設定されていません。<br>手順に従ってGoogle Apps ScriptのURLを貼り付けてください。</div>';
+                return;
+            }
+
+            // データ取得
+            fetchPosts();
 
             // フォーム送信時の処理
-            form.addEventListener('submit', (e) => {
+            form.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 errorMessage.classList.add('hidden');
                 const rawUrl = urlInput.value.trim();
@@ -97,6 +114,7 @@
                 const embedUrl = normalizeUrl(rawUrl);
 
                 if (!embedUrl) {
+                    errorMessage.textContent = '有効なInstagramの投稿またはリールのURLを入力してください。';
                     errorMessage.classList.remove('hidden');
                     return;
                 }
@@ -108,61 +126,116 @@
                     return;
                 }
 
-                // リストの先頭に追加
-                posts.unshift({
-                    id: Date.now().toString(),
-                    originalUrl: rawUrl,
-                    embedUrl: embedUrl
-                });
+                // 送信中のボタン状態変更
+                setLoading(true);
+                
+                try {
+                    // スプレッドシートに追加リクエストを送信
+                    await fetch(GAS_URL, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'text/plain', // CORSエラー回避のため text/plain
+                        },
+                        body: JSON.stringify({
+                            action: 'add',
+                            originalUrl: rawUrl,
+                            embedUrl: embedUrl
+                        })
+                    });
 
-                saveAndRender();
-                urlInput.value = '';
-                errorMessage.textContent = '有効なInstagramの投稿URLを入力してください。'; // エラーメッセージのリセット
+                    urlInput.value = '';
+                    await fetchPosts(); // 最新データを再取得して表示
+                } catch (error) {
+                    errorMessage.textContent = '追加に失敗しました。時間をおいて再度お試しください。';
+                    errorMessage.classList.remove('hidden');
+                } finally {
+                    setLoading(false);
+                }
             });
 
             // 削除ボタンの処理
-            postsGrid.addEventListener('click', (e) => {
+            postsGrid.addEventListener('click', async (e) => {
                 const deleteBtn = e.target.closest('.delete-btn');
                 if (deleteBtn) {
                     const id = deleteBtn.dataset.id;
-                    posts = posts.filter(p => p.id !== id);
-                    saveAndRender();
+                    const confirmDelete = confirm('この投稿を削除しますか？');
+                    if (!confirmDelete) return;
+
+                    deleteBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+                    deleteBtn.disabled = true;
+
+                    try {
+                        await fetch(GAS_URL, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'text/plain',
+                            },
+                            body: JSON.stringify({
+                                action: 'delete',
+                                id: id
+                            })
+                        });
+                        await fetchPosts(); // 最新データを再取得
+                    } catch (error) {
+                        alert('削除に失敗しました。');
+                        await fetchPosts(); // 表示を元に戻す
+                    }
                 }
             });
+
+            // スプレッドシートからデータを取得する関数
+            async function fetchPosts() {
+                postsGrid.classList.add('hidden');
+                emptyState.classList.add('hidden');
+                loadingState.classList.remove('hidden');
+
+                try {
+                    const response = await fetch(GAS_URL);
+                    const data = await response.json();
+                    
+                    if (Array.isArray(data)) {
+                        posts = data;
+                        renderPosts();
+                    } else {
+                        throw new Error('Invalid data format');
+                    }
+                } catch (error) {
+                    postsGrid.innerHTML = '<div class="col-span-full text-center text-red-500 py-10 bg-red-50 rounded-lg">データの読み込みに失敗しました。URLが間違っているか、GASの設定（全員アクセス可など）に問題があります。</div>';
+                    postsGrid.classList.remove('hidden');
+                } finally {
+                    loadingState.classList.add('hidden');
+                    postsGrid.classList.remove('hidden');
+                }
+            }
+
+            // ローディング状態の切り替え（ボタン用）
+            function setLoading(isLoading) {
+                if (isLoading) {
+                    submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 追加中...';
+                    submitBtn.classList.add('opacity-70', 'cursor-not-allowed');
+                } else {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i class="fas fa-plus"></i> 追加';
+                    submitBtn.classList.remove('opacity-70', 'cursor-not-allowed');
+                }
+            }
 
             // InstagramのURLをパースして、埋め込み用のURL（/embed）を作成する関数
             function normalizeUrl(urlStr) {
                 try {
                     const url = new URL(urlStr);
-                    // インスタグラムのドメインかチェック
                     if (!url.hostname.includes('instagram.com')) return null;
 
                     let path = url.pathname;
-                    // 末尾のスラッシュを削除
-                    if (path.endsWith('/')) {
-                        path = path.slice(0, -1);
-                    }
-                    // すでに /embed がついている場合は除去
-                    if (path.endsWith('/embed')) {
-                        path = path.slice(0, -6);
-                    }
+                    if (path.endsWith('/')) path = path.slice(0, -1);
+                    if (path.endsWith('/embed')) path = path.slice(0, -6);
+                    if (!path.match(/^\/(p|reel|tv)\/[a-zA-Z0-9_-]+/)) return null;
 
-                    // 基本的な投稿（p）やリール（reel）、IGTV（tv）のみ許可
-                    if (!path.match(/^\/(p|reel|tv)\/[a-zA-Z0-9_-]+/)) {
-                        return null;
-                    }
-
-                    // 末尾に /embed を付与して返す
                     return `https://www.instagram.com${path}/embed`;
                 } catch (e) {
                     return null;
                 }
-            }
-
-            // 保存して画面を更新
-            function saveAndRender() {
-                localStorage.setItem('insta_viewer_posts', JSON.stringify(posts));
-                renderPosts();
             }
 
             // 画面に投稿を描画する処理
